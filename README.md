@@ -7,4 +7,4 @@ Just copy the script from the `rainbow-highlight.el` to your emacs init-file (or
 
 
 
-![](screencap-example.gif)
+![](rainbow-example.gif)

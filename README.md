@@ -1,9 +1,9 @@
 # rainbow-highlight
-This is a lisp script for emacs that enabels you to make awesome highlight of any snippet of text.
+This is a Lisp script for Emacs that enables you to highlight any snippet of text in an awesome way.
 
-Just copy the script from the `rainbow-highlight.el` to your emacs init-file (or any other nerdery of your choice to get the letters in there, may it be require or inclusion or what not of an external file).
+Just copy the script from rainbow-highlight.el into your Emacs init file (or any other bit of nerdery of your choice—whether that’s require, include, or whatever way you prefer to load external files).
 
-... then just highlight any word or text and hit `C-c r` 💥🌈
+…then just highlight any word or text and hit C-c r 💥🌈
 
 
 

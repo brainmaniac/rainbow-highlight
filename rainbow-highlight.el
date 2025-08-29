@@ -1,20 +1,18 @@
-;; --- Rainbow Spotlight (percent sizing + centered + no line numbers) -------
+;; --- Rainbow Spotlight (single line, auto-fits window width) -----------------
 ;; Select a region → M-x rainbow-spotlight-region  (or hit C-c r)
-;; Fullscreen, huge font sized as % of frame height, horizontally centered,
-;; shimmering rainbow colors. Quit with `q`. Recompute size/centering with `R`.
+;; Fullscreen, huge font sized to fill window width (single line),
+;; shimmering rainbow colors. Quit with `q`. Manual refit (optional) with `R`.
 
-(require 'cl-lib)   ;; for cl-loop, cl-destructuring-bind
+(require 'cl-lib)
 (require 'color)
 
 ;; ==== User-tunable settings ==================================================
-(defvar rainbow-spotlight-screen-percent 0.30) ;; ~30% of frame height per line
-(defvar rainbow-spotlight-center-width 80)     ;; desired text width (columns)
 (defvar rainbow-spotlight-tick 0.08)           ;; lower = faster shimmer
 (defvar rainbow-spotlight-saturation 1.0)      ;; 0..1
 (defvar rainbow-spotlight-lightness 0.6)       ;; 0..1
 (defvar rainbow-spotlight-bg "#000000")
 
-;; ==== Internal state (don’t edit) ============================================
+;; ==== Internal state =========================================================
 (defvar-local rainbow-spotlight--timer nil)
 (defvar-local rainbow-spotlight--overlays nil)
 (defvar-local rainbow-spotlight--phase 0.0)
@@ -28,18 +26,14 @@
 
 (defun rainbow-spotlight--really-no-line-numbers ()
   "Disable any known line-number mode in this buffer, and keep it off."
-  ;; Vanilla Emacs:
   (setq-local display-line-numbers nil)
   (when (bound-and-true-p display-line-numbers-mode)
     (display-line-numbers-mode -1))
-  ;; Doom/derivatives:
   (when (boundp 'display-line-numbers-type)
     (setq-local display-line-numbers-type nil))
-  ;; Legacy packages:
   (when (fboundp 'nlinum-mode) (ignore-errors (nlinum-mode -1)))
   (when (fboundp 'linum-mode)  (ignore-errors (linum-mode -1))))
 
-;; Block attempts to turn line numbers on in our mode (e.g. global hooks).
 (with-eval-after-load 'display-line-numbers
   (defun rainbow-spotlight--inhibit-dln-turn-on (orig &rest args)
     (if (derived-mode-p 'rainbow-spotlight-mode)
@@ -57,38 +51,45 @@
                         (max 0.0 (min 1.0 rainbow-spotlight-lightness)))
     (color-rgb-to-hex r g b 2)))
 
-(defun rainbow-spotlight--calc-height-for-frame (&optional percent frame)
-  "Compute a :height so one line is about PERCENT of FRAME height."
-  (let* ((pct (or percent rainbow-spotlight-screen-percent))
-         (frm (or frame (selected-frame)))
-         (frame-px (frame-pixel-height frm))
-         (char-px (with-selected-frame frm (frame-char-height)))
-         (desired (max 1 (floor (* pct frame-px))))
-         (height (round (* 100.0 (/ desired (float (max 1 char-px)))))))
-    (max 120 (min 4000 height)))) ;; sanity clamp
-
-(defun rainbow-spotlight--apply-font-size ()
-  "Apply dynamic font size based on frame height."
+(defun rainbow-spotlight--set-font-height (height)
+  "Apply a specific :height to the spotlight buffer's default face."
   (when rainbow-spotlight--remap-cookie
     (face-remap-remove-relative rainbow-spotlight--remap-cookie))
   (setq rainbow-spotlight--remap-cookie
         (face-remap-add-relative 'default
-                                 :height (rainbow-spotlight--calc-height-for-frame)
+                                 :height height
                                  :background rainbow-spotlight-bg)))
 
+(defun rainbow-spotlight--window-body-pixel-width (&optional win)
+  "Return pixel width of WIN's text area."
+  (window-body-width (or win (selected-window)) t))
+
+(defun rainbow-spotlight--text-pixel-width ()
+  "Return the pixel width of all buffer text (single line)."
+  (car (window-text-pixel-size nil (point-min) (point-max))))
+
+(defun rainbow-spotlight--fit-to-window-width (&optional frame)
+  "Set the largest :height so the line fits the window width."
+  (let* ((frm (or frame (selected-frame)))
+         (win (or (get-buffer-window (current-buffer) frm)
+                  (frame-selected-window frm)))
+         (avail (max 1 (- (rainbow-spotlight--window-body-pixel-width win) 2)))
+         (low 20) (high 10000) (best 20))
+    (cl-loop repeat 18 do
+             (let ((mid (floor (/ (+ low high) 2.0))))
+               (rainbow-spotlight--set-font-height mid)
+               (redisplay t)
+               (if (<= (rainbow-spotlight--text-pixel-width) avail)
+                   (setq best mid low (1+ mid))
+                 (setq high (1- mid)))))
+    (rainbow-spotlight--set-font-height best)))
+
 (defun rainbow-spotlight--center ()
-  "Center text horizontally. Prefer visual-fill-column; fallback to margins."
-  (if (require 'visual-fill-column nil t)
-      (progn
-        (setq-local visual-fill-column-width rainbow-spotlight-center-width)
-        (setq-local visual-fill-column-center-text t)
-        (visual-fill-column-mode 1))
-    ;; Fallback: center by window margins around a fixed width.
-    (let* ((win (selected-window))
-           (total (window-total-width win))
-           (target (min rainbow-spotlight-center-width (max 20 total)))
-           (side (max 0 (/ (- total target) 2))))
-      (set-window-margins win side side))))
+  "Ensure no margins/centering; we want full-width single line."
+  (when (boundp 'visual-fill-column-mode)
+    (ignore-errors (visual-fill-column-mode -1)))
+  (let ((win (selected-window)))
+    (set-window-margins win 0 0)))
 
 (defun rainbow-spotlight--make-overlays ()
   "Create one overlay per visible character so we can colorize them."
@@ -133,6 +134,25 @@
     (cancel-timer rainbow-spotlight--timer)
     (setq rainbow-spotlight--timer nil)))
 
+;; Auto-refit on frame size change (GLOBAL hook; scans spotlight windows)
+(defun rainbow-spotlight--on-size-change (frame)
+  "Refit any Rainbow Spotlight windows on FRAME."
+  (dolist (win (window-list frame 'no-mini))
+    (with-selected-window win
+      (when (derived-mode-p 'rainbow-spotlight-mode)
+        (rainbow-spotlight--center)
+        (rainbow-spotlight--fit-to-window-width frame)))))
+
+;; Defer initial fit until AFTER fullscreening
+(defun rainbow-spotlight--initial-fit-deferred (buf)
+  "Run a first fit after the window layout has settled."
+  (when (buffer-live-p buf)
+    (let ((win (get-buffer-window buf t)))
+      (when (window-live-p win)
+        (with-selected-window win
+          (with-current-buffer buf
+            (rainbow-spotlight-recompute-font)))))))
+
 ;; ==== Mode ====================================================================
 (defvar rainbow-spotlight-mode-map
   (let ((m (make-sparse-keymap)))
@@ -142,38 +162,36 @@
   "Keymap for rainbow-spotlight-mode.")
 
 (define-derived-mode rainbow-spotlight-mode special-mode "Rainbow-Spotlight"
-  "Fullscreen large-font rainbow shimmer mode."
-  ;; Keep line numbers off, even if globally enabled:
+  "Fullscreen large-font rainbow shimmer mode (single-line, full-width)."
   (rainbow-spotlight--really-no-line-numbers)
-
   (setq-local cursor-type nil
               mode-line-format nil
-              header-line-format (propertize "  Rainbow Spotlight — q: quit, R: recompute font"
-                                             'face '(:height 140 :weight bold))
-              truncate-lines nil
+              header-line-format nil
+              truncate-lines t
+              word-wrap nil
               show-trailing-whitespace nil
               line-spacing 0.25
               bidi-display-reordering nil
               bidi-paragraph-direction 'left-to-right)
-
   (buffer-face-mode 1)
-  (rainbow-spotlight--apply-font-size)
   (rainbow-spotlight--center)
-  (read-only-mode 1))
+  (read-only-mode 1)
+  ;; GLOBAL hook (no LOCAL arg), we'll remove it on quit:
+  (add-hook 'window-size-change-functions #'rainbow-spotlight--on-size-change))
 
 (defun rainbow-spotlight-recompute-font ()
-  "Recompute font size and centering from current frame height (use after resize)."
+  "Re-fit the single-line text to the current window width."
   (interactive)
-  (rainbow-spotlight--apply-font-size)
   (rainbow-spotlight--center)
+  (rainbow-spotlight--fit-to-window-width)
   (rainbow-spotlight--really-no-line-numbers)
-  (message "Rainbow Spotlight: recomputed for %.0f%% of frame height"
-           (* 100 rainbow-spotlight-screen-percent)))
+  (message "Rainbow Spotlight: refit to window width"))
 
 (defun rainbow-spotlight-quit ()
   "Exit the spotlight buffer and restore previous window layout."
   (interactive)
   (rainbow-spotlight--stop-timer)
+  (remove-hook 'window-size-change-functions #'rainbow-spotlight--on-size-change)
   (let ((buf (current-buffer))
         (conf rainbow-spotlight--winconf))
     (when (window-configuration-p conf)
@@ -181,10 +199,11 @@
     (kill-buffer buf)))
 
 (defun rainbow-spotlight-region (beg end)
-  "Display region from BEG to END in fullscreen rainbow spotlight."
+  "Display region from BEG to END in fullscreen rainbow spotlight (one line)."
   (interactive "r")
   (unless (use-region-p) (user-error "Select some text first"))
-  (let* ((text (buffer-substring-no-properties beg end))
+  (let* ((raw (buffer-substring-no-properties beg end))
+         (text (replace-regexp-in-string "[ \t\n]+" " " raw))
          (buf (get-buffer-create "*Rainbow Spotlight*")))
     (setq rainbow-spotlight--winconf (current-window-configuration))
     (with-current-buffer buf
@@ -195,10 +214,14 @@
       (rainbow-spotlight-mode)
       (rainbow-spotlight--make-overlays)
       (rainbow-spotlight--start-timer)
+      (setq-local truncate-lines t word-wrap nil)
       (setq buffer-read-only t))
+    ;; Show fullscreen first:
     (pop-to-buffer buf)
     (delete-other-windows)
-    ;; Gentle vertical centering kick-off:
+    ;; Defer the first fit until after layout settles:
+    (run-with-idle-timer 0 nil #'rainbow-spotlight--initial-fit-deferred buf)
+    ;; Aesthetic recenter:
     (recenter (/ (window-body-height) 2))))
 
 (global-set-key (kbd "C-c r") #'rainbow-spotlight-region)
